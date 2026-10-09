@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Provider Monitor</title>
+<style>
+:root{color-scheme:dark;--bg:#10131b;--panel:#191e29;--border:#303848;--muted:#a4b0c5;--accent:#8dbeff;--good:#8bd9b3;--warn:#f0c67f}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eef3fc;font:15px/1.6 system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:36px 24px}header{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}h1{font-size:28px;margin:0}h2{font-size:20px}h3{font-size:17px;margin:0 0 10px}.muted{color:var(--muted)}.label{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}button,.button,select{font:inherit;border:1px solid var(--border);background:#242e40;color:#eef3fc;border-radius:8px;padding:8px 13px;cursor:pointer;text-decoration:none}button:hover,.button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;gap:8px;flex-wrap:wrap}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:24px 0}.card,section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px}.card.selected{border-color:var(--accent)}.card{cursor:pointer;text-align:left;width:100%}.badge{display:inline-block;background:#303b51;border-radius:20px;padding:2px 10px;font-size:12px;margin:0 6px 6px 0}.ok,.recommended{color:var(--good)}.error,.partial,.needs_baseline,.missing,.needs_investigation{color:var(--warn)}.metrics{display:flex;gap:20px;flex-wrap:wrap;margin:14px 0}.metrics strong{display:block;font-size:22px}.metrics small{color:var(--muted)}code{font:12px ui-monospace,monospace;overflow-wrap:anywhere}.warnings{color:var(--warn);padding-left:20px}.commit{border-top:1px solid var(--border);padding:20px 0}.commit:first-child{border-top:0}.commit h3{margin:6px 0}.commit p{margin:8px 0}.commit details{margin:12px 0}.commit li{margin:4px 0}.row{display:flex;gap:12px;justify-content:space-between;align-items:center;flex-wrap:wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#10141d;padding:16px;border-radius:8px;max-height:500px;overflow:auto;font:12px/1.5 ui-monospace,monospace}.notice{border-left:3px solid var(--accent);padding:12px 16px;background:#1c2637;margin:20px 0}#feedback{min-height:24px;color:var(--warn)}#local-path{overflow-wrap:anywhere}section{margin-top:18px}#priorities:empty{display:none}a{color:var(--accent)}@media(max-width:760px){.cards{grid-template-columns:1fr}main{padding:20px 16px}}
+</style>
+</head>
+<body><main>
+<header><div><div class="label">Five agents · one review workspace</div><h1>Provider Monitor</h1><div class="muted">Review upstream changes before bringing them into your code.</div></div><div class="actions"><button id="check">Check now</button><button id="reanalyze">Reanalyze</button><a class="button" href="/api/export">Export import plan</a></div></header>
+<div class="notice" id="manager">Connecting to the orchestrator…</div>
+<div class="muted" id="local-path"></div><div class="muted" id="run-status" role="status"></div><div id="feedback" role="alert"></div>
+<div class="cards" id="cards"></div>
+<section id="priorities"></section>
+<section><div class="row"><h2 id="provider-title">Provider review</h2><label>Show <select id="filter"><option value="all">All reviewed commits</option><option value="recommended">Recommended</option><option value="optional">Optional</option><option value="defer">Deferred</option><option value="needs_investigation">Needs investigation</option></select></label></div><div id="provider-meta"></div><ul class="warnings" id="warnings"></ul><div id="commits"></div></section>
+<section><h2>Recent checks</h2><div id="history" class="muted">No checks yet.</div></section>
+</main><script>
+'use strict';
+const $=id=>document.getElementById(id);
+let state=null,selected='llama.cpp',renderKey='',historyKey='';
+function node(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el}
+function short(sha){return sha?sha.slice(0,12):'Unknown'}
+function date(value){return value?new Date(value).toLocaleString():'Not checked'}
+async function request(path,options){const res=await fetch(path,options);const body=await res.json();if(!res.ok)throw Error(body.error||'Request failed');return body}
+async function action(path){try{await request(path,{method:'POST',headers:{'X-PMA-Action':'1'}});$('feedback').textContent='Check queued. Results will update when review completes.';await refresh()}catch(e){$('feedback').textContent=e.message}}
+$('check').onclick=()=>action('/api/check');$('reanalyze').onclick=()=>action('/api/reanalyze');$('filter').onchange=()=>{renderKey='';render()};
+function render(){
+ if(!state)return;
+ $('manager').textContent=state.manager_summary+(state.ai_enabled?' AI review enabled.':' AI review disabled; findings are preliminary.');
+ $('local-path').textContent='Local providers: '+state.local_repo_path;
+ $('run-status').textContent=(state.busy?'Agents are checking providers. Previous results remain visible. ':state.queued?'Check queued. ':'Monitoring. ')+(state.last_completed?'Last cycle: '+date(state.last_completed)+'. ':'')+'Polling delay: '+state.next_delay_seconds+'s.';
+ if(state.error)$('feedback').textContent=state.error;
+ const key=JSON.stringify([state.providers,selected,$('filter').value]);if(key===renderKey)return;renderKey=key;
+ $('cards').replaceChildren();
+ for(const p of state.providers){const card=node('button',undefined,'card'+(p.id===selected?' selected':''));card.append(node('h3',p.id),node('span',p.status,'badge '+p.status));const metrics=node('div',undefined,'metrics');for(const [value,label] of [[p.behind??'—','commits ahead'],[p.reviewed??'—','reviewed']]){const m=node('div');m.append(node('strong',String(value)),node('small',label));metrics.append(m)}card.append(metrics,node('div',p.summary,'muted'),node('div','Checked '+date(p.checked_at),'muted'));card.onclick=()=>{selected=p.id;renderKey='';render()};$('cards').append(card)}
+ $('priorities').replaceChildren();if(state.priorities.length){$('priorities').append(node('h2','Manager priorities'));for(const p of state.priorities){const item=node('div');item.append(node('strong',p.provider+' · '+short(p.sha)+' '),node('span',p.subject));$('priorities').append(item)}}
+ const p=state.providers.find(p=>p.id===selected);if(!p)return;
+ $('provider-title').textContent=selected;
+ $('provider-meta').replaceChildren(node('div','Local baseline: '+short(p.local?.baseline)+' · Local HEAD: '+short(p.local?.head)+' · Upstream HEAD: '+short(p.head),'muted'),node('div','Branch: '+(p.branch||'Default')+' · Baseline source: '+(p.local?.baseline_source||'Unknown')+' · Coverage: '+(p.coverage_complete?'Complete':'Incomplete / not established'),'muted'));
+ $('warnings').replaceChildren(...(p.warnings||[]).map(w=>node('li',w)));
+ $('commits').replaceChildren();const commits=(p.commits||[]).filter(c=>$('filter').value==='all'||c.analysis.category===$('filter').value);
+ if(!commits.length)$('commits').append(node('p',(p.behind===0?'No upstream changes after this baseline.':'No reviewed commits match this view.'),'muted'));
+ for(const c of commits){const el=node('article',undefined,'commit'),a=c.analysis;el.append(node('span',a.category.replaceAll('_',' '),'badge '+a.category),node('span',a.source+' · '+a.confidence+' confidence','badge'),node('code',short(c.sha)+' · '+date(c.date)),node('h3',c.subject),node('p',a.rationale));if(c.analysis_error)el.append(node('p',c.analysis_error,'warnings'));const details=node('details'),summary=node('summary','Risk, prerequisites, and validation');details.append(summary);for(const [label,items] of [['Risks',a.risks],['Suggested dependencies ('+a.dependency_status+')',a.dependencies],['Suggested validation',a.validation],['Affected files',c.files]]){details.append(node('strong',label));const list=node('ul');for(const item of items||[])list.append(node('li',item));if(!list.childNodes.length)list.append(node('li','None identified; this does not establish independence.'));details.append(list)}el.append(details);const btn=node('button','View diff'),diff=node('div');btn.onclick=async()=>{if(diff.childNodes.length){diff.replaceChildren();btn.textContent='View diff';return}btn.disabled=true;try{const data=await request('/api/diff/'+encodeURIComponent(p.id)+'/'+c.sha);if(data.truncated)diff.append(node('p','Diff exceeded the display limit and is truncated.','warnings'));diff.append(node('pre',data.text||'(No first-parent patch available.)'));btn.textContent='Hide diff'}catch(e){diff.append(node('p',e.message,'warnings'))}finally{btn.disabled=false}};el.append(btn,diff);$('commits').append(el)}
+ loadHistory(p);
+}
+async function loadHistory(p){const key=p.id+':'+(p.checked_at||'');if(key===historyKey)return;historyKey=key;const current=p.id;try{const rows=await request('/api/history/'+encodeURIComponent(p.id));if(selected!==current)return;$('history').replaceChildren(...rows.map(r=>node('p',date(r.checked_at)+' · '+r.status+' · '+r.summary)));if(!rows.length)$('history').textContent='No completed checks yet.'}catch(e){$('history').textContent=e.message;historyKey=''}}
+async function refresh(){try{state=await request('/api/status');render()}catch(e){$('feedback').textContent='Connection unavailable: '+e.message}}
+async function poll(){await refresh();setTimeout(poll,2000)}poll();
+</script></body></html>
